@@ -46,8 +46,11 @@ def _apply_in_memory_controls(
     control = dict(out.get("control", {}))
 
     if selected_year is not None and _clean(selected_year) != "":
+        # selected_year is the reporting / forecast year requested by the user.
+        # Do NOT overwrite current_fiscal_year here.
+        # current_fiscal_year must remain the workbook-defined live/open FY
+        # so that future years are not treated as fresh shock years.
         rolling_control["selected_year"] = _clean(selected_year)
-        rolling_control["current_fiscal_year"] = _clean(selected_year)
 
     if selected_scenario is not None and _clean(selected_scenario) != "":
         control["scenario"] = _clean(selected_scenario)

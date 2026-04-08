@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-SIMULATION ENGINE V6
+SIMULATION ENGINE V7
 Scenario simulation layer for KRA forecasting model.
 
 Design
@@ -8,7 +8,7 @@ Design
 - annual tax engine remains annual
 - annual scenario delta is computed first
 - current-FY effect is scaled to the affected months only
-- monthly delta is allocated from scenario start month and duration
+- future years are not forced into the short shock window
 - annual scenario totals are rebuilt from monthly paths
 - all allocated heads are rebuilt consistently from monthly results
 """
@@ -58,6 +58,13 @@ def _get_selected_year(data: Dict[str, Any]) -> str:
     if selected_year not in {"2025/26", "2026/27", "2027/28"}:
         raise SimulationEngineError(f"Invalid selected year '{selected_year}'.")
     return selected_year
+
+
+def _get_current_fiscal_year(data: Dict[str, Any]) -> str:
+    current_fiscal_year = _clean(data.get("rolling_control", {}).get("current_fiscal_year", ""))
+    if current_fiscal_year not in {"2025/26", "2026/27", "2027/28"}:
+        return "2025/26"
+    return current_fiscal_year
 
 
 def _next_fiscal_year(selected_year: str) -> Optional[str]:
@@ -272,7 +279,6 @@ def rebuild_scenario_detail_from_monthly(
     original_final = pd.to_numeric(out["Final Forecast"], errors="coerce").fillna(0.0)
     rebuilt_final = pd.to_numeric(out["Scenario Annual Rebuild"], errors="coerce").fillna(original_final)
 
-    # Critical fix: rebuild every allocated head from the monthly rebuild
     use_rebuild = out["Internal Tax Head"].isin(allocated_heads_clean)
     out.loc[use_rebuild, "Final Forecast"] = rebuilt_final[use_rebuild]
 
@@ -366,6 +372,7 @@ def run_simulation_engine(
     severity: str = "",
 ) -> Dict[str, Any]:
     selected_year = _get_selected_year(data)
+    current_fiscal_year = _get_current_fiscal_year(data)
     next_year = _next_fiscal_year(selected_year)
 
     if "detail" not in baseline_outputs:
@@ -392,22 +399,31 @@ def run_simulation_engine(
         carryover_to_next_fy=carryover_to_next_fy,
     )
 
-    annual_delta_current = _scale_delta_for_partial_current_fy(
-        annual_delta_df=annual_delta_full[["Internal Tax Head", "Scenario Impact"]],
-        monthly_shares_df=monthly_shares_df,
-        scenario_start_month=split["start_month"],
-        months_current_fy=split["months_current_fy"],
-    )
+    if selected_year == current_fiscal_year:
+        annual_delta_effective = _scale_delta_for_partial_current_fy(
+            annual_delta_df=annual_delta_full[["Internal Tax Head", "Scenario Impact"]],
+            monthly_shares_df=monthly_shares_df,
+            scenario_start_month=split["start_month"],
+            months_current_fy=split["months_current_fy"],
+        )
+        allocation_duration = split["months_current_fy"]
+        allocation_start_month = split["start_month"]
+        allocation_mode = "current_year_partial_effect_reconciled"
+    else:
+        annual_delta_effective = annual_delta_full[["Internal Tax Head", "Scenario Impact"]].copy()
+        allocation_duration = None
+        allocation_start_month = 1
+        allocation_mode = "future_year_full_year_allocation"
 
     monthly_delta = allocate_annual_delta_to_months(
-        annual_delta_df=annual_delta_current,
+        annual_delta_df=annual_delta_effective,
         monthly_shares_df=monthly_shares_df,
         fiscal_year=selected_year,
         months_loaded=0,
         allocate_remaining_only=False,
-        scenario_duration_months=split["months_current_fy"],
+        scenario_duration_months=allocation_duration,
         annual_delta_col="Scenario Impact",
-        scenario_start_month=split["start_month"],
+        scenario_start_month=allocation_start_month,
     )
 
     allocated_heads = set(monthly_delta["Internal Tax Head"].astype(str).str.strip().unique().tolist())
@@ -478,6 +494,7 @@ def run_simulation_engine(
         "total_summary": total_summary,
         "allocation_metadata": {
             "selected_year": selected_year,
+            "current_fiscal_year": current_fiscal_year,
             "next_year": next_year,
             "scenario_start_month": scenario_start_month,
             "scenario_duration_months": scenario_duration_months,
@@ -487,6 +504,6 @@ def run_simulation_engine(
             "severity": severity,
             "months_current_fy": split["months_current_fy"],
             "months_next_fy": split["months_next_fy"],
-            "allocation_mode": "current_year_partial_effect_reconciled",
+            "allocation_mode": allocation_mode,
         },
     }
